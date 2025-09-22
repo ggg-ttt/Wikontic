@@ -179,8 +179,7 @@ def populate_property_aliases(PROP_2_LABEL, PROP_2_ALIASES, db, collection_name=
     collection.insert_many(records)
     logger.info(f"Successfully populated {collection_name} with {len(records)} records")
 
-
-def create_index_for_entity_types(db, collection_name='entity_type_aliases', embedding_field_name="alias_text_embedding", index_name='entity_type_aliases'):
+def create_search_index_for_entity_types(db, collection_name='entity_type_aliases', embedding_field_name="alias_text_embedding", index_name='entity_type_aliases'):
     logger.info(f"Starting to create index {index_name} for {collection_name}")
     collection = db.get_collection(collection_name)
     vector_search_index_model = SearchIndexModel(
@@ -206,45 +205,8 @@ def create_index_for_entity_types(db, collection_name='entity_type_aliases', emb
         logger.info(f"New index {index_name} created successfully: {result}")
     except Exception as e:
         logger.error(f"Error creating new vector search index {index_name}: {str(e)}")
-        
 
-def create_index_for_entities(db, collection_name='entity_aliases', embedding_field_name="alias_text_embedding", entity_type_id_field_name='entity_type', index_name='entities'):
-    logger.info(f"Starting to create index {index_name} for {collection_name}")
-    collection = db.get_collection(collection_name)
-    vector_search_index_model = SearchIndexModel(
-        definition={
-            "mappings": {
-                "dynamic": True,
-                "fields": {
-                    embedding_field_name: {
-                        "dimensions": 768,
-                        "similarity": "cosine",
-                        "type": "knnVector",
-                    },
-                    entity_type_id_field_name: {
-                        "type": "token"
-                    },
-                    "sample_id": {
-                        # "type": "number"
-                        "type": "token"
-
-                    }
-                },
-            }
-        },
-        name=index_name,
-    )
-
-    try:
-        result = collection.create_search_index(model=vector_search_index_model)
-        logger.info("Creating index...")
-        time.sleep(20)  
-        logger.info(f"New index {index_name} created successfully: {result}")
-    except Exception as e:
-        logger.error(f"Error creating new vector search index {index_name}: {str(e)}")
-
-
-def create_index_for_properties(db, collection_name='property_aliases', embedding_field_name='alias_text_embedding', prop_id_field_name='relation_id', index_name='property_aliases_ids'):
+def create_search_index_for_properties(db, collection_name='property_aliases', embedding_field_name='alias_text_embedding', prop_id_field_name='relation_id', index_name='property_aliases_ids'):
     logger.info(f"Starting to create index {index_name} for {collection_name}")
     collection = db.get_collection(collection_name)
     vector_search_index_model = SearchIndexModel(
@@ -274,6 +236,32 @@ def create_index_for_properties(db, collection_name='property_aliases', embeddin
     except Exception as e:
         logger.error(f"Error creating new vector search index {index_name}: {str(e)}")
 
+def create_indexes(db):
+    logger.info("Creating indexes for entity_types collection...")
+    db.entity_types.create_index([("entity_type_id", 1)])
+    db.entity_types.create_index([("label", 1)])
+
+    logger.info("Creating indexes for entity_type_aliases collection...")
+    db.entity_type_aliases.create_index([("entity_type_id", 1)])
+    db.entity_type_aliases.create_index([("alias_label", 1)])
+
+    logger.info("Creating indexes for properties collection...")
+    db.properties.create_index([("property_id", 1)])
+
+    # logger.info("Creating indexes for property_aliases collection...")
+    # db.property_aliases.create_index("relation_id")
+
+    logger.info("Creating indexes for entity_aliases collection...")
+    db.entity_aliases.create_index([("entity_type", 1), ("sample_id", 1)])
+    db.entity_aliases.create_index([("label", 1)])
+    
+    db.create_collection("triplets")
+    logger.info("Creating indexes for triplets collection...")
+    db.triplets.create_index([("sample_id", 1)])
+
+    logger.info("All indexes created successfully")
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Populate MongoDB with Wikidata ontology data')
@@ -294,17 +282,12 @@ if __name__ == "__main__":
                         help='Collection name for properties')
     parser.add_argument('--property_aliases_collection', type=str, default="property_aliases",
                         help='Collection name for property aliases')
-    parser.add_argument('--entity_collection', type=str, default="entity_aliases",
-                        help='Collection name for entities')
-    
+
     # Index names
     parser.add_argument('--entity_types_index', type=str, default="entity_type_aliases",
                         help='Index name for entity types')
-    parser.add_argument('--property_aliases_index', type=str, default="property_aliases_ids",
+    parser.add_argument('--property_aliases_index', type=str, default="property_aliases",
                         help='Index name for property aliases')
-    parser.add_argument('--entity_index', type=str, default="entities",
-                        help='Index name for entities')
-    
     
     args = parser.parse_args()
 
@@ -363,14 +346,12 @@ if __name__ == "__main__":
     populate_property_aliases(PROP_2_LABEL, PROP_2_ALIASES, db,
                             collection_name=args.property_aliases_collection)
     
-    db.create_collection(args.entity_collection)
-    
-    # Create indexes
-    create_index_for_entity_types(db, collection_name=args.entity_type_aliases_collection, 
+    # Create search indexes
+    create_search_index_for_entity_types(db, collection_name=args.entity_type_aliases_collection, 
                                 index_name=args.entity_types_index)
-    create_index_for_properties(db, collection_name=args.property_aliases_collection, 
+    create_search_index_for_properties(db, collection_name=args.property_aliases_collection, 
                               index_name=args.property_aliases_index)
-    create_index_for_entities(db, collection_name=args.entity_collection,
-                              index_name=args.entity_index)
-    
+
+    # Create indexes
+    create_indexes(db)                            
     logger.info("Database population process completed")

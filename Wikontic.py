@@ -40,7 +40,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-with open("media/wikontic_pipeline_wo_logo.png", "rb") as f:
+with open("media/wikontic-example-wo-logo.png", "rb") as f:
     img_bytes = f.read()
 encoded_pipeline = base64.b64encode(img_bytes).decode()
 
@@ -49,10 +49,10 @@ Welcome to the **Wikontic** - an integrated tool for Knowledge
 Graph (KG) construction and question answering (QA).
 """)
 
-st.markdown("""
-    The service is currently available at https://wikontic.deeppavlov.ai            
+# st.markdown("""
+#     The service is currently available at https://wikontic.deeppavlov.ai            
 
-""")
+# """)
 
 st.markdown(
     f"""

@@ -8,7 +8,7 @@ import json
 import re
 from pathlib import Path
 from typing import Dict, List, Union, Optional
-
+import tenacity
 # import httpx
 
 # proxy_url = "socks5://localhost:1080"
@@ -32,6 +32,8 @@ client = openai.OpenAI(
     # http_client=http_client
 )
 
+MAX_ATTEMPTS = 1
+
 class LLMTripletExtractor:
     """A class for extracting and processing knowledge graph triplets using OpenAI's LLMs."""
     
@@ -45,7 +47,7 @@ class LLMTripletExtractor:
     def __init__(self, 
                  prompt_folder_path: str = 'utils/prompts/',
                  system_prompt_paths: Optional[Dict[str, str]] = None,
-                 model: str = "gpt-4o"):
+                 model: str = "gpt-4o", max_attempts=3):
         """
         Initialize the LLMTripletExtractor.
         
@@ -57,11 +59,16 @@ class LLMTripletExtractor:
         if system_prompt_paths is None:
             system_prompt_paths = {
                 'triplet_extraction': 'propmt_1_types_qualifiers.txt',
-                'relation_ranker': 'prompt_choose_relation_and_types.txt', 
+                'relation_entity_types_ranker': 'prompt_choose_relation_and_types.txt', 
+                'relation_ranker': 'prompt_choose_relation.txt',
+                'entity_types_ranker': 'prompt_choose_entity_types.txt',
+                'relation_ranker_wo_entity_types': 'prompt_choose_relation_wo_entity_types.txt',
                 'subject_ranker': 'rank_subject_names.txt',
                 'object_ranker': 'rank_object_names.txt',
+                'quailfier_object_ranker': 'rank_object_qualifiers.txt',
                 'question_entity_extractor': 'prompt_entity_relation_extraction_from_question.txt',
                 'question_entity_ranker': 'prompt_choose_relevant_entities_for_question.txt',
+                'question_entity_ranker_wo_types': 'prompt_choose_relevant_entities_for_question_wo_types.txt',
                 # 'qa': 'qa_prompt_hotpot.txt'
                 'qa': 'qa_prompt.txt'
             }
@@ -77,6 +84,11 @@ class LLMTripletExtractor:
         self.messages = []
         self.prompt_tokens_num = 0
         self.completion_tokens_num = 0
+        self.current_cost = 0
+
+        self._refine_attempt = 0
+        self._prev_error = None  # store previous exception
+        self.MAX_ATTEMPTS = max_attempts
         
         # Set pricing
         if model not in self.MODEL_PRICES:
@@ -104,7 +116,7 @@ class LLMTripletExtractor:
                 try:
                     return json.loads(match.group(1))
                 except json.JSONDecodeError:
-                    logger.error(f"Failed to parse JSON: {text}")
+                    logging.ERROR(f"Failed to parse JSON: {text}")
                     
         return text
 
@@ -125,21 +137,166 @@ class LLMTripletExtractor:
         )
         self.completion_tokens_num += response.usage.completion_tokens
         self.prompt_tokens_num += response.usage.prompt_tokens
-        
+        self.current_cost += response.usage.completion_tokens * self.output_price + response.usage.prompt_tokens * self.input_price
+
         content = response.choices[0].message.content.strip()
+        logger.debug("Output content: %s\n%s", str(content), "-" * 100)
         output = self.extract_json(content) if transform_to_json else content
 
         self.messages = messages + [{'role': 'assistant', 'content': output}]
         return output
 
+    @tenacity.retry(stop=tenacity.stop_after_attempt(MAX_ATTEMPTS), reraise=True)
     def extract_triplets_from_text(self, text: str) -> dict:
         """Extract knowledge graph triplets from text."""
         # return {"system_prompt": self.prompts['triplet_extraction'],
         #     "user_prompt": f'Text: "{text}"'}
-        return self.get_completion(
-            system_prompt=self.prompts['triplet_extraction'],
-            user_prompt=f'Text: "{text}"'
-        )
+
+        self._refine_attempt += 1
+        attempt = self._refine_attempt
+        logger.log(logging.DEBUG, "Attempt of a function call extract_triplets_from_text: %s", attempt)
+        system_prompt = self.prompts['triplet_extraction']
+        if attempt > 1:
+            prev_error = self._prev_error
+            system_prompt += f"\n(Previous attempt #{attempt-1} failed with error: {prev_error}. Please adjust your answer!)"
+            logger.log(logging.ERROR, "System prompt: %s", system_prompt)
+        
+        try: 
+            return self.get_completion(
+                system_prompt=system_prompt,
+                user_prompt=f'Text: "{text}"'
+            )
+        except Exception as e:
+            self._prev_error = e
+            # if json from output is broken after 3 attempts  - raise an exception
+            logger.log(logging.ERROR, str(e))
+            if attempt > self.MAX_ATTEMPTS:
+                raise e
+    
+    
+    @tenacity.retry(stop=tenacity.stop_after_attempt(MAX_ATTEMPTS), reraise=True)
+    def refine_entity_types(self, text: str, triplet: dict, 
+                                       candidate_subject_types: List[str], candidate_object_types: List[str]) -> dict:
+        """Refine relations and entity types using candidate backbone triplets."""
+        triplet_filtered = {k: triplet[k] for k in 
+                          ['subject', 'relation', 'object', 'subject_type', 'object_type']}
+
+        candidates_subject_types_str = json.dumps(candidate_subject_types)
+        candidates_object_types_str = json.dumps(candidate_object_types)
+        logger.log(logging.DEBUG, "candidates subject types: %s\n%s", str(candidates_subject_types_str), "-" * 100)
+        logger.log(logging.DEBUG, "candidates object types: %s\n%s", str(candidates_object_types_str), "-" * 100)
+
+        self._refine_attempt += 1
+        attempt = self._refine_attempt
+        logger.log(logging.DEBUG, "Attempt of a function call refine_entity_types: %s", attempt)
+        system_prompt = self.prompts['entity_types_ranker']
+        if attempt > 1:
+            prev_error = self._prev_error
+            system_prompt += f"\n(Previous attempt #{attempt-1} failed with error: {prev_error}. Please adjust your answer!)"
+            logger.log(logging.ERROR, "System prompt: %s", system_prompt)
+        # return {"system_prompt": self.prompts['relation_ranker'],
+        #         "user_prompt": f'Text: "{text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\n'}
+        #                f'Candidate Triplets: {candidates_str}"'
+        # print(f'Text: "{text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\nCandidate Triplets: {candidates_str}')
+        # print(f'Text: {text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\nCandidate Triplets: {candidates_str}')
+        try:
+            output = self.get_completion(
+                system_prompt=system_prompt, 
+                user_prompt=f'Text: "{text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\n'
+                        f'Candidate Subject Types: {candidates_subject_types_str}\n'
+                        f'Candidate Object Types: {candidates_object_types_str}'
+            )
+        except Exception as e:
+            self._prev_error = e
+            logger.log(logging.ERROR, str(e))
+            # if json from output is broken after 3 attempts  - raise an exception
+            if attempt > self.MAX_ATTEMPTS:
+                raise e
+
+        logger.log(logging.DEBUG, "refined subject type: %s\n%s", str(output['subject_type']), "-" * 100)
+        logger.log(logging.DEBUG, "refined object type: %s\n%s", str(output['object_type']), "-" * 100)
+
+        try:
+            assert output['subject_type'] in candidate_subject_types, "Refined subject type is not in candidate subject types"
+            assert output['object_type'] in candidate_object_types, "Refined object type is not in candidate object types"
+        except Exception as e:
+            self._prev_error = e
+            logger.log(logging.ERROR, str(e))
+            # do not raise an exception - save triplet in ontology filtered collection
+        return output
+
+    @tenacity.retry(stop=tenacity.stop_after_attempt(MAX_ATTEMPTS), reraise=True)
+    def refine_relation(self, text: str, triplet: dict, candidate_relations: List[dict]) -> dict:
+        """Refine relation using candidate relations."""
+        triplet_filtered = {k: triplet[k] for k in 
+                          ['subject', 'relation', 'object', 'subject_type', 'object_type']}
+        
+        candidates_str = json.dumps(candidate_relations)
+        logger.log(logging.DEBUG, "candidates relations: %s\n%s", str(candidates_str), "-" * 100)
+        self._refine_attempt += 1
+        attempt = self._refine_attempt
+
+        logger.log(logging.DEBUG, "Attempt of a function call refine_relation: %s", attempt)
+        system_prompt = self.prompts['relation_ranker']
+
+        if attempt > 1:
+            prev_error = self._prev_error
+            system_prompt += f"\n(Previous attempt #{attempt-1} failed with error {prev_error}. Please adjust your answer!)"
+            logger.log(logging.ERROR, "System prompt: %s", system_prompt)
+        try:
+            output = self.get_completion(
+                system_prompt=system_prompt,
+                user_prompt=f'Text: "{text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\n'
+                       f'Candidate relations: {candidates_str}'
+            )
+        except Exception as e:
+            self._prev_error = e
+            logger.log(logging.ERROR, str(e))
+            # if json from output is broken after 3 attempts  - raise an exception
+            if attempt > self.MAX_ATTEMPTS:
+                raise e
+
+        logger.log(logging.DEBUG, "refined relation: %s\n%s", str(output['relation']), "-" * 100)
+
+        try: 
+            assert output['relation'] in candidate_relations, "Refined relation is not in candidate relations"
+        except Exception as e:
+            self._prev_error = e
+            logger.log(logging.ERROR, str(e))
+            # do not raise an exception - save triplet in ontology filtered collection
+
+        return output
+    
+    @tenacity.retry(stop=tenacity.stop_after_attempt(MAX_ATTEMPTS), reraise=True)
+    def refine_relation_wo_entity_types(self, text: str, triplet: dict, candidate_relations: List[dict]) -> dict:
+        """Refine relation using candidate relations."""
+        triplet_filtered = {k: triplet[k] for k in 
+                          ['subject', 'relation', 'object']}
+        candidates_str = json.dumps(candidate_relations)
+        logger.log(logging.DEBUG, "candidates relations: %s\n%s", str(candidates_str), "-" * 100)
+
+        attempt = self._refine_attempt
+
+        logger.log(logging.DEBUG, "Attempt of a function call refine_relation_wo_entity_types: %s", attempt)
+        self._refine_attempt += 1
+        system_prompt = self.prompts['relation_ranker_wo_entity_types']
+
+        if attempt > 1:
+            prev_error = self._prev_error
+            system_prompt += f"\n(Previous attempt #{attempt-1} failed with error {prev_error}. Please adjust your answer!)"
+            logger.log(logging.ERROR, "System prompt: %s", system_prompt)
+        try:
+            return self.get_completion(
+            system_prompt=system_prompt,
+                user_prompt=f'Text: "{text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\n'
+                            f'Candidate relations: {candidates_str}'
+            )
+        except Exception as e:
+            self._prev_error = e
+            logger.log(logging.ERROR, str(e))
+            # if json from output is broken after 3 attempts  - raise an exception
+            if self._refine_attempt > self.MAX_ATTEMPTS:
+                raise e
 
     def refine_relation_and_entity_types(self, text: str, triplet: dict, 
                                        candidate_triplets: List[dict]) -> dict:
@@ -155,31 +312,52 @@ class LLMTripletExtractor:
         # print(f'Text: "{text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\nCandidate Triplets: {candidates_str}')
         # print(f'Text: {text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\nCandidate Triplets: {candidates_str}')
         return self.get_completion(
-            system_prompt=self.prompts['relation_ranker'],
+            system_prompt=self.prompts['relation_entity_types_ranker'],
             user_prompt=f'Text: "{text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\n'
-                       f'Candidate Triplets: {candidates_str}"'
+                        f'Candidate Triplets: {candidates_str}'
         )
+
 
     def refine_entity(self, text: str, triplet: dict, candidates: List[str], 
                      is_object: bool = False) -> dict:
         """Refine subject/object names using candidate options from pre-built KG."""
+        
         triplet_filtered = {k: triplet[k] for k in ['subject', 'relation', 'object']}
         original_name = triplet_filtered['object' if is_object else 'subject']
-        
+
+        self._refine_attempt += 1
+        attempt = self._refine_attempt
+
+        logger.log(logging.DEBUG, "Attempt of a function call refine_entity: %s", attempt)
         prompt_key = 'object_ranker' if is_object else 'subject_ranker'
         entity_type = 'Object' if is_object else 'Subject'
+        system_prompt = self.prompts[prompt_key]
+
+        if attempt > 1:
+            prev_error = self._prev_error
+            system_prompt += f"\n(Previous attempt #{attempt-1} failed with error: {prev_error}. Please adjust your answer!)"
+            logger.log(logging.ERROR, "System prompt: %s", system_prompt)
+
 
         # return {"system_prompt": self.prompts[prompt_key],
         #     "user_prompt": f'Text: "{text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\n'
         #                f'Original {entity_type}: {original_name}\n'
         #                f'Candidate {entity_type}s: {json.dumps(candidates)}"'}
         
-        return self.get_completion(
-            system_prompt=self.prompts[prompt_key],
-            user_prompt=f'Text: "{text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\n'
-                       f'Original {entity_type}: {original_name}\n'
-                       f'Candidate {entity_type}s: {json.dumps(candidates)}"'
-        )
+        try:
+            return self.get_completion(
+                system_prompt=system_prompt,
+                user_prompt=f'Text: "{text}\nExtracted Triplet: {json.dumps(triplet_filtered)}\n'
+                        f'Original {entity_type}: {original_name}\n'
+                        f'Candidate {entity_type}s: {json.dumps(candidates)}"'
+            )
+        except Exception as e:
+            self._prev_error = e
+            logger.log(logging.ERROR, str(e))
+            # if json from output is broken after 3 attempts  - raise an exception
+            if attempt > self.MAX_ATTEMPTS:
+                raise e
+
 
     def extract_entities_from_question(self, question: str) -> dict:
         """Extract entities from a question."""
@@ -194,6 +372,13 @@ class LLMTripletExtractor:
             system_prompt=self.prompts['question_entity_ranker'],
             user_prompt=f"Question: {question}\nEntities: {entity_list}"
         )
+    
+    def identify_relevant_entities_wo_types(self, question: str, entity_list: List[str]) -> List[str]:
+        """Identify entities relevant to a question."""
+        return self.get_completion(
+            system_prompt=self.prompts['question_entity_ranker_wo_types'],
+            user_prompt=f"Question: {question}\nEntities: {entity_list}"
+        )
 
     def answer_question(self, question: str, triplets: List[dict]) -> str:
         """Answer a question using knowledge graph triplets."""
@@ -205,9 +390,21 @@ class LLMTripletExtractor:
 
     def calculate_cost(self) -> float:
         """Calculate the total cost of API usage."""
-        return (self.prompt_tokens_num * self.input_price + 
-                self.completion_tokens_num * self.output_price) / 1e6
+        return self.current_cost / 1e6
     
     def calculate_used_tokens(self) -> int:
         """Calculate the total # of used tokens for generation"""
         return self.prompt_tokens_num, self.completion_tokens_num
+
+    def reset_tokens(self):
+        """Reset the total # of used tokens for generation"""
+        self.prompt_tokens_num = 0
+        self.completion_tokens_num = 0
+    
+    def reset_messages(self):
+        """Reset the messages"""
+        self.messages = []
+    
+    def reset_error_state(self):
+        self._prev_error = None
+        self._refine_attempt = 0
