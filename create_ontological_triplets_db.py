@@ -86,6 +86,7 @@ if __name__ == "__main__":
     db_name = args.db_name
     mongo_client = get_mongo_client(mongo_uri)
     db = mongo_client.get_database(db_name)
+    
     if args.drop_collections:
         for collection_name in db.list_collection_names():
             db.drop_collection(collection_name)
