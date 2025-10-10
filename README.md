@@ -22,21 +22,44 @@ Knowledge Graphs (KGs) provide structured, verifiable representations of knowled
 - `utils/`  
   Utilities for LLM-based triple extraction and alignment with Wikidata ontology rules.
 
-- `utils/ontology_mappings/`  
-  JSON files containing ontology mappings from Wikidata.
-
-- `utils/structured_dynamic_index_utils_with_db.py`  
-  - `Aligner` class: ontology alignment  
-  - `StructuredInferenceWithDB` class: triple extraction
 
 - `utils/openai_utils.py`  
   `LLMTripletExtractor` class for LLM-based triple extraction.
+
+
+### To use ontology:
+
+- `utils/ontology_mappings/`  
+  JSON files containing ontology mappings from Wikidata.
+
+- `utils/structured_inference_with_db.py`  
+  - `StructuredInferenceWithDB` class: triple extraction and qa functions
+
+- `utils/structured_aligner.py`
+  -  `Aligner` class: ontology alignment and entity name refinement
+
+
+### Not to use ontology:
+- `utils/inference_with_db.py`
+  - `InferenceWithDB` class: triple extraction and qa functions
+
+- `utils/dynamic_aligner.py`
+  -  `Aligner` class: entity and relation name refinement
+
+### Evaluation:
+- `inference_and_eval`
+	- Scripts for building KGs for MuSiQue and HotPot datasets and evaluation of QA performance
+- `analysis`
+  - Notebooks with downstream analysis of the resulted KG
+
+### Use Wikontic as a service:
 
 - `pages/` and `Wikontic.py`  
   Code for the web service for knowledge graph extraction and visualization.
 
 - `Dockerfile`  
   For building a containerized web service.
+
 
 ---
 
