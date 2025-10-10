@@ -2,3 +2,5 @@ __pycache__/
 .devcontainer
 .env
 .venv
+qa_logs/
+inference_logs/
