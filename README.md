@@ -47,9 +47,9 @@ Knowledge Graphs (KGs) provide structured, verifiable representations of knowled
   -  `Aligner` class: entity and relation name refinement
 
 ### Evaluation:
-- `inference_and_eval`
+- `inference_and_eval/`
 	- Scripts for building KGs for MuSiQue and HotPot datasets and evaluation of QA performance
-- `analysis`
+- `analysis/`
   - Notebooks with downstream analysis of the resulted KG
 
 ### Use Wikontic as a service:
