@@ -22,3 +22,5 @@ Select the most appropriate candidate entity types for both subject and object f
 Provide ONLY an answer in JSON format with the following keys:
 "subject_type": Selected subject type candidate.
 "object_type": Selected object type candidate.
+
+NO additional text, NO "```" in json, ONLY triplets in JSON format.

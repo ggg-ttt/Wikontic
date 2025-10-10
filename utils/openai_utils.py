@@ -1,7 +1,7 @@
 import openai
 import os
 from dotenv import load_dotenv, find_dotenv
-from tenacity import retry, wait_random_exponential, before_sleep_log
+from tenacity import retry, wait_random_exponential, before_sleep_log, stop_after_attempt
 import logging
 import sys
 import json
@@ -9,28 +9,29 @@ import re
 from pathlib import Path
 from typing import Dict, List, Union, Optional
 import tenacity
-# import httpx
-
-# proxy_url = "socks5://localhost:1080"
-
-# proxies = {
-#     "http://": proxy_url,
-#     "https://": proxy_url,
-# }
-
-# http_client = httpx.Client(proxy=proxy_url)
+import httpx
 
 # Configure logging
 logging.basicConfig(stream=sys.stderr)
 logger = logging.getLogger('OpenAIUtils')
 logger.setLevel(logging.ERROR)
 
-# Initialize OpenAI client
 _ = load_dotenv(find_dotenv())
-client = openai.OpenAI(
-    api_key=os.getenv("KEY"),
-    # http_client=http_client
-)
+# # OpenAI
+# client = openai.OpenAI(
+#     api_key=os.getenv("KEY"),
+#     # http_client=http_client
+# )
+
+# OpenRouter
+base_url = os.getenv("OPENROUTER_BASE_URL")
+client = openai.OpenAI(base_url=base_url, api_key=os.getenv("OPENROUTER_KEY"))
+
+# # Local inference
+# client = openai.OpenAI(base_url=os.getenv("LOCAL_BASE_URL"),
+#             api_key=os.getenv("LOCAL_KEY"),
+#             http_client=openai.DefaultHttpxClient(verify=False)
+#         )
 
 MAX_ATTEMPTS = 1
 
@@ -41,13 +42,15 @@ class LLMTripletExtractor:
         "gpt-4o": {"input": 2.5, "output": 10},
         "gpt-4o-mini": {"input": 0.15, "output": 0.6},
         "gpt-4.1-mini": {"input": 0.4, "output": 1.6},
-        "gpt-4.1": {"input": 2.0, "output": 8.0}
+        "gpt-4.1": {"input": 2.0, "output": 8.0}, 
+        'Meta-llama/Llama-3.3-70B-Instruct': {"input": 0.04, "output": 0.12}
     }
 
     def __init__(self, 
                  prompt_folder_path: str = 'utils/prompts/',
                  system_prompt_paths: Optional[Dict[str, str]] = None,
-                 model: str = "gpt-4o", max_attempts=3):
+                 model: str = "gpt-4o", max_attempts=3,
+                 hotpot: bool = False):
         """
         Initialize the LLMTripletExtractor.
         
@@ -58,20 +61,31 @@ class LLMTripletExtractor:
         """
         if system_prompt_paths is None:
             system_prompt_paths = {
-                'triplet_extraction': 'propmt_1_types_qualifiers.txt',
-                'relation_entity_types_ranker': 'prompt_choose_relation_and_types.txt', 
-                'relation_ranker': 'prompt_choose_relation.txt',
-                'entity_types_ranker': 'prompt_choose_entity_types.txt',
-                'relation_ranker_wo_entity_types': 'prompt_choose_relation_wo_entity_types.txt',
-                'subject_ranker': 'rank_subject_names.txt',
-                'object_ranker': 'rank_object_names.txt',
-                'quailfier_object_ranker': 'rank_object_qualifiers.txt',
-                'question_entity_extractor': 'prompt_entity_relation_extraction_from_question.txt',
-                'question_entity_ranker': 'prompt_choose_relevant_entities_for_question.txt',
-                'question_entity_ranker_wo_types': 'prompt_choose_relevant_entities_for_question_wo_types.txt',
+                'triplet_extraction': 'triplet_extraction/propmt_1_types_qualifiers.txt',
+
+                'relation_entity_types_ranker': 'ontology_refinement/prompt_choose_relation_and_types.txt', 
+                'relation_ranker': 'ontology_refinement/prompt_choose_relation.txt',
+                'entity_types_ranker': 'ontology_refinement/prompt_choose_entity_types.txt',
+
+                'relation_ranker_wo_entity_types': 'name_refinement/prompt_choose_relation_wo_entity_types.txt',
+                'subject_ranker': 'name_refinement/rank_subject_names.txt',
+                'object_ranker': 'name_refinement/rank_object_names.txt',
+                'quailfier_object_ranker': 'name_refinement/rank_object_qualifiers.txt',
+
+                'question_entity_extractor': 'qa/prompt_entity_extraction_from_question.txt',
+                'question_entity_ranker': 'qa/prompt_choose_relevant_entities_for_question.txt',
+                'question_entity_ranker_wo_types': 'qa/prompt_choose_relevant_entities_for_question_wo_types.txt',
                 # 'qa': 'qa_prompt_hotpot.txt'
-                'qa': 'qa_prompt.txt'
+                
+                'question_decomposition_1': 'qa/question_decomposition_1.txt',
+                'qa_collapsing': 'qa/qa_collapsing_prompt.txt',
+                'qa_is_answered': 'qa/prompt_is_answered.txt',
+                'qa': 'qa/qa_prompt.txt'
+
             }
+            if hotpot:
+                system_prompt_paths['qa'] = 'qa/qa_prompt_hotpot.txt'
+            logger.info(f"System prompt qa paths: {system_prompt_paths['qa']}")
 
         # Load all prompts
         prompt_folder = Path(prompt_folder_path)
@@ -121,7 +135,7 @@ class LLMTripletExtractor:
         return text
 
     @retry(wait=wait_random_exponential(multiplier=1, max=60), 
-           before_sleep=before_sleep_log(logger, logging.ERROR))
+           before_sleep=before_sleep_log(logger, logging.ERROR), stop=stop_after_attempt(5))
     def get_completion(self, system_prompt: str, user_prompt: str, 
                       transform_to_json: bool = True) -> Union[dict, list, str]:
         """Get completion from OpenAI API with retry logic."""
@@ -141,6 +155,7 @@ class LLMTripletExtractor:
 
         content = response.choices[0].message.content.strip()
         logger.debug("Output content: %s\n%s", str(content), "-" * 100)
+        # print(content)
         output = self.extract_json(content) if transform_to_json else content
 
         self.messages = messages + [{'role': 'assistant', 'content': output}]
@@ -385,6 +400,33 @@ class LLMTripletExtractor:
         return self.get_completion(
             system_prompt=self.prompts['qa'],
             user_prompt=f'Question: {question}\n\nTriplets: "{triplets}"',
+            transform_to_json=False
+        )
+    
+    def collapse_question(self, original_question: str, question: str, answer: str) -> str:
+        """Collapse a question using knowledge graph triplets."""
+        return self.get_completion(
+            system_prompt=self.prompts['qa_collapsing'],
+            user_prompt=f'Original multi-hop question: {original_question}\n\Answered sub-question: {question}\n\Answer: {answer}',
+            transform_to_json=True
+        )
+
+    def decompose_question(self, question: str) -> str:
+        """Decompose a question using knowledge graph triplets."""
+        return self.get_completion(
+            system_prompt=self.prompts['question_decomposition_1'],
+            user_prompt=f'Question: {question}',
+            transform_to_json=False
+        )
+    
+    def check_if_question_is_answered(self, question: str, subquestions: List[str], answers: List[str]) -> str:
+        """Check if a question is answered."""
+        user_prompt = f'Original multi-hop question: {question}\nQuestion->answer sequence:\n'
+        for question, answer in zip(subquestions, answers):
+            user_prompt += f'{question} -> {answer}\n'
+        return self.get_completion(
+            system_prompt=self.prompts['qa_is_answered'],
+            user_prompt=user_prompt,
             transform_to_json=False
         )
 

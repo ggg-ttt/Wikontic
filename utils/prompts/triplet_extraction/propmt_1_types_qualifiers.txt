@@ -19,6 +19,8 @@ Return only triplets in **JSON format** as a list of dictionaries, where each di
 - "subject_type": a class that describes the subject 
 - "object_type": a class that describes the object 
 
+NO additional text, NO "```" in json, ONLY triplets in JSON format.
+
 
 <example>
 ### Input: 

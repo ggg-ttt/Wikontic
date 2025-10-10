@@ -405,7 +405,7 @@ class StructuredInferenceWithDB:
         print("Chosen entities after identification: ", chosen_entities)
         return chosen_entities
 
-    def answer_question(self, question, relevant_entities, sample_id='0', use_filtered_triplets=False):
+    def answer_question(self, question, relevant_entities, sample_id='0', use_filtered_triplets=False, use_qualifiers=False):
         print("Chosen relevant entities: ", relevant_entities)
         # entity_set = {(e['entity'], e['entity_type']) for e in relevant_entities}
         entity_set = {e['entity'] for e in relevant_entities}
@@ -440,21 +440,24 @@ class StructuredInferenceWithDB:
             for doc in results:
                 entities4search.append(doc['subject'])
                 entities4search.append(doc['object'])
-                for q in doc['qualifiers']:
-                    entities4search.append(q['object'])
+                if use_qualifiers:
+                    for q in doc['qualifiers']:
+                        entities4search.append(q['object'])
                     
             if use_filtered_triplets:
                 filtered_results = list(self.triplets_db.get_collection(self.aligner.ontology_filtered_triplets_collection_name).aggregate(pipeline))
                 for doc in filtered_results:
                     entities4search.append(doc['subject'])
                     entities4search.append(doc['object'])
-                    for q in doc['qualifiers']:
-                        entities4search.append(q['object'])
+                    if use_qualifiers:
+                        for q in doc['qualifiers']:
+                            entities4search.append(q['object'])
 
             entities4search = list(set(entities4search))
 
         # print(results)
-        supporting_triplets = [
+        if use_qualifiers:
+            supporting_triplets = [
             {
                 "subject": item['subject'],
                 "relation": item['relation'],
@@ -463,12 +466,130 @@ class StructuredInferenceWithDB:
             }
             for item in results
         ]
+        else:
+            supporting_triplets = [
+                {
+                    "subject": item['subject'],
+                    "relation": item['relation'],
+                    "object": item['object']
+                }
+                for item in results
+            ]
         logger.log(logging.DEBUG, "Supporting triplets: %s\n%s" % (str(supporting_triplets), "-" * 100))
 
         ans = self.extractor.answer_question(
             question=question, triplets=supporting_triplets
         )
         return supporting_triplets, ans
+
+    
+    def answer_with_qa_collapsing(self, question, sample_id='0', max_attempts=5, use_qualifiers=False, use_filtered_triplets=False):
+        collapsed_question_answer = ''
+        collapsed_question_sequence = []
+        collapsed_answer_sequence = []
+        # supporting_triplets_sequence = []
+
+        logger.log(logging.DEBUG, "Question: %s" % (str(question)))
+        collapsed_question = self.extractor.decompose_question(question)
+
+        for i in range(max_attempts):
+            extracted_entities = self.extractor.extract_entities_from_question(collapsed_question)
+            logger.log(logging.DEBUG, "Collapsed question: %s" % (str(collapsed_question)))
+            logger.log(logging.DEBUG, "Extracted entities: %s" % (str(extracted_entities)))
+
+            if len(collapsed_question_answer) > 0:
+                extracted_entities.append(collapsed_question_answer)
+            
+            entities4search = []
+            for ent in extracted_entities:
+                similar_entities = self.aligner.retrieve_similar_entity_names(
+                    entity_name=ent, k=10, sample_id=sample_id
+                )
+                similar_entities = [e['entity'] for e in similar_entities]
+                entities4search.extend(similar_entities)
+            
+            entities4search = list(set(entities4search))
+            logger.log(logging.DEBUG, "Similar entities: %s" % (str(entities4search)))
+            
+
+            # if len(extracted_entities) == 0:
+            #     return collapsed_question_answer
+
+            or_conditions = []
+            for ent in entities4search:
+                or_conditions.append({'$and': [{'subject': ent}]})
+                or_conditions.append({'$and': [{'object': ent}]})
+                if use_qualifiers:
+                    or_conditions.append({'$and': [{'qualifiers.object': ent}]})
+
+            pipeline = [
+                {
+                    '$match': {
+                        'sample_id': sample_id,
+                        '$or': or_conditions
+                    }
+                }
+            ]
+            results = list(self.triplets_db.get_collection(self.aligner.triplets_collection_name).aggregate(pipeline))
+
+            if use_filtered_triplets:
+                logger.log(logging.DEBUG, "Using filtered triplets")
+                filtered_results = list(self.triplets_db.get_collection(self.aligner.ontology_filtered_triplets_collection_name).aggregate(pipeline))
+                logger.log(logging.DEBUG, "Filtered results: %s" % (str(len(filtered_results))))
+                results.extend(filtered_results)
+
+            if use_qualifiers:
+                supporting_triplets = [
+
+                    {
+                        "subject": item['subject'],
+                        "relation": item['relation'],
+                        "object": item['object'],
+                        "qualifiers": item['qualifiers']
+                    }
+                    for item in results
+                ]
+            else:
+                supporting_triplets = [
+                    {
+                        "subject": item['subject'],
+                        "relation": item['relation'],
+                        "object": item['object']
+                    }
+                    for item in results
+                ]
+
+            # if len(supporting_triplets) == 0:
+            #     return collapsed_question_answer
+
+            # supporting_triplets_sequence.append(supporting_triplets)
+
+            logger.log(logging.DEBUG, 'Supporting triplets length: %s' % (str(len(supporting_triplets))))
+            # logger.log(logging.DEBUG, "Supporting triplets: %s\n%s" % (str(supporting_triplets), "-" * 100))
+
+            collapsed_question_answer = self.extractor.answer_question(collapsed_question, supporting_triplets)
+            collapsed_question_sequence.append(collapsed_question)
+            collapsed_answer_sequence.append(collapsed_question_answer)
+
+            # if len(collapsed_question_answer) == 0:
+            #     return collapsed_question_answer
+
+            logger.log(logging.DEBUG, "Collapsed question: %s" % (str(collapsed_question)))
+            logger.log(logging.DEBUG, "Collapsed question answer: %s" % (str(collapsed_question_answer)))
+
+
+            is_answered = self.extractor.check_if_question_is_answered(question, collapsed_question_sequence, collapsed_answer_sequence)
+            question_answer_sequence = list(zip(collapsed_question_sequence, collapsed_answer_sequence))
+            logger.log(logging.DEBUG, 'Collapsed question-answer sequence: %s' % (str(question_answer_sequence)))
+
+            if is_answered == 'NOT FINAL':
+                collapsed_question = self.extractor.collapse_question(original_question=question, question=collapsed_question, answer=collapsed_question_answer)
+                continue
+            else:
+                return is_answered
+        
+        logger.log(logging.DEBUG, "Final answer: %s" % (str(collapsed_question_answer)))
+        return collapsed_question_answer
 
 
     # def build_candidate_triplet_backbones(

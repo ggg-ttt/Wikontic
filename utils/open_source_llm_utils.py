@@ -24,10 +24,10 @@ class LLMTripletExtractor:
     """A class for extracting and processing knowledge graph triplets using OpenAI's LLMs."""
 
 
-    def __init__(self, 
-                 prompt_folder_path: str = 'utils/prompts/',
-                 system_prompt_paths: Optional[Dict[str, str]] = None,
-                 model: str = "meta-llama/Llama-3.3-70B-Instruct"):
+    def __init__(self,
+        prompt_folder_path: str = 'utils/prompts/',
+        system_prompt_paths: Optional[Dict[str, str]] = None,
+        model: str = "meta-llama/Llama-3.3-70B-Instruct"):
         """
         Initialize the LLMTripletExtractor.
         
